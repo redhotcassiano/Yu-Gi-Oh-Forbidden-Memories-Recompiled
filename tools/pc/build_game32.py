@@ -406,7 +406,11 @@ def build_mods(build, release=False):
     one object file (tools/pc/build_mod.py), which the game's own loader
     links in when the mod is applied (src/pc/mods/object_loader.c). The
     object is built once, in tmp/pc/mod-build, and the same file is copied
-    beside both the Linux and the Windows game: one mod, every system.
+    beside both the Linux and the Windows game: one mod, every system. The
+    folder there is named by build_mod.py's flags: checkouts of other
+    branches share tmp, and an object built with other flags (the branch
+    thunks' flags need a game that lends the thunks) must not pass for up to
+    date in them.
 
     The SDK goes beside the game too, so a release carries what a mod author
     builds against: modapi.h and the game's headers under sdk/include, the C
@@ -422,6 +426,8 @@ def build_mods(build, release=False):
         shutil.rmtree(out_root, ignore_errors=True)
     os.makedirs(out_root, exist_ok=True)
     write_sdk(build)
+    flags = " ".join(build_mod.FLAGS + build_mod.CLANG_FLAGS + build_mod.GCC_FLAGS)
+    mod_build = f"tmp/pc/mod-build/{hashlib.sha256(flags.encode()).hexdigest()[:8]}"
     built = []
     for manifest in sorted(glob.glob("mods/*/mod.json")):
         if tracked is not None and manifest not in tracked:
@@ -438,14 +444,14 @@ def build_mods(build, release=False):
             copy_if_newer(path, os.path.join(out_dir, os.path.relpath(path, source_dir)))
         # Checked against this build's own export table: the other system's
         # may be older than this build.
-        obj = build_mod.build(source_dir, out_dir=f"tmp/pc/mod-build/{name}", games=[build], quiet=True)
+        obj = build_mod.build(source_dir, out_dir=f"{mod_build}/{name}", games=[build], quiet=True)
         if not obj:
             built.append(f"{name} (data)")
             continue
         for stale in glob.glob(f"{out_dir}/*.so") + glob.glob(f"{out_dir}/*.dll"):
             os.remove(stale)   # native libraries from before mods were objects
         # Where the manifest's "library" puts it, which may be a subdirectory.
-        copy_if_newer(obj, os.path.join(out_dir, os.path.relpath(obj, f"tmp/pc/mod-build/{name}")))
+        copy_if_newer(obj, os.path.join(out_dir, os.path.relpath(obj, f"{mod_build}/{name}")))
         built.append(name)
     if built:
         print(f"{out_root}: " + ", ".join(built))
