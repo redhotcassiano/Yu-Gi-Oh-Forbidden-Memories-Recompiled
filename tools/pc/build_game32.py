@@ -87,6 +87,16 @@ if WINDOWS:
         f"-I{WIN32_DEPS}/sdl/include", f"-I{WIN32_DEPS}/include", f"-I{WIN32_DEPS}/include/freetype2",
         "-mno-ms-bitfields",  # the game's structures, shared with native code (see CFLAGS)
         "-gcodeview"]
+# Every unit's indirect calls and jumps go through __x86_indirect_thunk_<reg>
+# (src/pc/guest/branch_thunks.c), which sends a target in guest memory to its
+# native function: tables in the retail data image hold MIPS addresses, and
+# a call through one must not depend on DEP faulting it (notes/pc-build.md).
+# clang also turns switch jump tables into compare trees; GCC jumps through
+# the thunk for those, which lets a host target straight through.
+BRANCH_THUNKS = (["-mretpoline-external-thunk"] if WINDOWS else
+                 ["-mindirect-branch=thunk-extern", "-mindirect-branch-register"])
+CFLAGS = CFLAGS + BRANCH_THUNKS
+NATIVE_CFLAGS = NATIVE_CFLAGS + BRANCH_THUNKS
 if PORTABLE:
     SYSROOT_COMPILE, SYSROOT_LINK = build_linux_sysroot.flags()
     CFLAGS = CFLAGS + SYSROOT_COMPILE
@@ -233,6 +243,32 @@ def definitions(objects):
         if len(parts) >= 2 and parts[-2] in "TDBRV" and c_name(parts[-1]):
             counts[c_name(parts[-1])] = counts.get(c_name(parts[-1]), 0) + 1
     return counts
+
+def direct_branches(objects, names):
+    """The names in `names` the objects call or jump to by name (a
+    pc-relative relocation, the only kind -fno-pie code has for a branch) and
+    never use as a value."""
+    relative = {"IMAGE_REL_I386_REL32"} if WINDOWS else {"R_386_PC32", "R_386_PLT32"}
+    called, used = set(), set()
+    for line in run([OBJDUMP, "-r", *objects]).splitlines():
+        parts = line.split()
+        if len(parts) == 3 and c_name(parts[2]) in names:
+            (called if parts[1] in relative else used).add(c_name(parts[2]))
+    for name in sorted(called & used):
+        print(f"{name}: called by name and used as an address; left at its guest address, where only the "
+              "fault handler (DEP) takes the calls")
+    return called - used
+
+def write_guest_branches(build, branches):
+    """guest_branches.o: a host entry for each pinned module function that
+    code calls by name (see main), which hands its guest address to the
+    branch thunks' resolver (src/pc/guest/branch_thunks.c)."""
+    with open(f"{build}/guest_branches.c", "w") as handle:
+        handle.write("/* Written by tools/pc/build_game32.py. */\nextern void Memories_GuestBranchDirect(void);\n")
+        handle.writelines(f'__asm__(".text\\n.globl {PREFIX}{name}\\n{PREFIX}{name}:\\n    pushl $0x{address:08X}\\n'
+                          f'    jmp {PREFIX}Memories_GuestBranchDirect\\n");\n' for name, address in sorted(branches.items()))
+    run([CC, *NATIVE_CFLAGS, "-c", f"{build}/guest_branches.c", "-o", f"{build}/guest_branches.o"])
+    return f"{build}/guest_branches.o"
 
 MOD_INTERNALS = ("Mods_", "Json_", "ObjectLoader_")  # the mod system itself (src/pc/mods)
 
@@ -670,6 +706,15 @@ def main():
             pinned[name] = addresses[name]
     # Overlay entry points and data live outside the resident image.
     stubs += [name for name in unknown if name in undefined]
+    # Some pinned names are functions of a loadable module that the C calls
+    # by name (func_8016AA6C: name entry, in the shared 0x80168000 bank). A
+    # direct call to a guest address never reaches the indirect-branch
+    # thunks, so each of those becomes a host entry that sends its address
+    # through their resolver instead, which picks the resident module's
+    # native function (or the MIPS interpreter) as a call through a pointer
+    # would. Without DEP the pinned call ran the MIPS bytes.
+    branches = {name: pinned.pop(name) for name in sorted(direct_branches([obj(s) for s in game + NATIVE], set(pinned)))}
+    guest_branches = write_guest_branches(options.build, branches)
     if WINDOWS:
         # lld reads no GNU linker scripts: pins are absolute symbols from an
         # assembly file, and aliases rename the references in the objects
@@ -732,7 +777,8 @@ def main():
             handle.write(f'    {{"{name}", 0x{bank:08X}u, 0x{identifier:X}u, {", ".join(ranges)}}},\n')
         handle.write(f"}};\nconst unsigned Memories_ModuleCount = {len(shared)};\n")
     run([CC, *NATIVE_CFLAGS, "-c", f"{options.build}/stubs.c", "-o", f"{options.build}/stubs.o"])
-    write_mod_exports(options.build, game_defined | native_defined | tentative | set(pinned) | set(stubs), aliases)
+    write_mod_exports(options.build, game_defined | native_defined | tentative | set(pinned) | set(branches) | set(stubs),
+                      aliases)
     version = write_version(options.build)
     output = f"{options.build}/memories-pc"
     if WINDOWS:
@@ -754,8 +800,8 @@ def main():
              "-Wl,-Xlink=-debug:symtab",
              "-Wl,--large-address-aware", "-Wl,--disable-dynamicbase", "-Wl,--nxcompat",
              "-Wl,--allow-multiple-definition", f"{options.build}/guest_symbols.o",
-             *[obj(s) for s in NATIVE + game], f"{options.build}/stubs.o", f"{options.build}/mod_exports.o", version,
-             f"{options.build}/section_markers.o", *icon,
+             *[obj(s) for s in NATIVE + game], f"{options.build}/stubs.o", guest_branches, f"{options.build}/mod_exports.o",
+             version, f"{options.build}/section_markers.o", *icon,
              f"{WIN32_DEPS}/sdl/lib/libSDL3.dll.a", "-lopengl32", f"{WIN32_DEPS}/lib/libfreetype.a",
              f"{WIN32_DEPS}/lib/libpng16.a", f"{WIN32_DEPS}/lib/libzs.a", "-ldbghelp", "-lwinhttp", "-static", "-lpthread"])
         shutil.copy(f"{WIN32_DEPS}/sdl/bin/SDL3.dll", options.build)
@@ -771,7 +817,7 @@ def main():
         run(["gcc", "-m32", "-no-pie", "-o", output, *build_linux_sysroot.startfiles(),
              *[f"-Wl,--section-start={name}=0x{address:08X}" for name, address in sorted(fixed.items())],
              *[obj(s) for s in game + NATIVE],
-             f"{options.build}/stubs.o", f"{options.build}/mod_exports.o", version, f"{options.build}/guest_symbols.ld", *(libraries if options.backend == "sdl"
+             f"{options.build}/stubs.o", guest_branches, f"{options.build}/mod_exports.o", version, f"{options.build}/guest_symbols.ld", *(libraries if options.backend == "sdl"
                else ["-lm", *fonts, "-lX11", "-lXext", "-lasound", *system]), *build_linux_sysroot.endfiles()])
     build_mods(options.build, options.release)
     copy_languages(options.build, options.release)

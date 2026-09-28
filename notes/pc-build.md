@@ -83,8 +83,38 @@ How it works:
   and writes a linker script pinning every data symbol that game C leaves
   undefined or tentative (`-fcommon`) to its retail address: 612 symbols.
   Initialized data defined in C stays in host `.data`, which keeps function
-  pointers in C tables native. Guest-image tables that hold MIPS function
-  addresses are **not** handled yet and need an audit.
+  pointers in C tables native.
+- Guest-image tables do hold MIPS function addresses (the text opcode
+  handlers `D_80090F18[]`/`D_80090E64[]`, callbacks an overlay installs), and
+  native code calls through them. Every unit the driver compiles (game,
+  overlays, `src/pc`, the generated units, and the mods through
+  `build_mod.py`) is built with `-mretpoline-external-thunk` (clang, Windows)
+  or `-mindirect-branch=thunk-extern -mindirect-branch-register` (GCC,
+  Linux), so each indirect call or jump loads its target into a register and
+  goes through `__x86_indirect_thunk_<reg>` (`src/pc/guest/branch_thunks.c`).
+  A target in guest memory (`0x80000000`, `0xA0000000`, the physical mirror)
+  goes to the resolver in `image.c`: the native function of that address from
+  the generated `Memories_FunctionMap`, or `Memories_MipsThunk` for an
+  interpreted overlay; one with no native function ends the game with a
+  report instead of being jumped to. Any other target is jumped to after one
+  `test`. The thunks keep every register (the target's too) and the stack as
+  the caller left them. A module function that C calls by name
+  (`func_8016AA6C`, name entry's entry point in the shared `0x80168000` bank,
+  and 12 more) would be pinned to its guest address like the data, and a
+  direct call is no indirect branch: the driver finds those names in the
+  objects' pc-relative relocations and gives each a host stub instead
+  (`guest_branches.c` in the build directory), which pushes the address and
+  enters the same resolver (`Memories_GuestBranchDirect`), so the resident
+  module's function is picked as before. This is the primary mechanism, and it needs nothing
+  from the system; the fault of executing guest RAM (mapped without execute
+  permission) is the second net, which works only where DEP is on. Before the
+  thunks it was the only one, and a player with DEP off (Windows `AlwaysOff`)
+  crashed on the title's Options: the handler at `0x80038b4c` ran its MIPS
+  bytes as x86. `MEMORIES_TEST_EXEC_GUEST=1` maps guest RAM executable, as it
+  is without DEP, on any machine: with it, only the thunks stand between a
+  guest call and the MIPS bytes. `pc_branch_thunks` (CTest) checks all seven
+  thunks' register and stack contract. clang also turns switch jump tables
+  into compare trees; GCC sends them through a thunk too.
 - Undefined functions become stubs calling `Memories_Unimplemented`. Current
   link report (`tmp/pc/game32/link-report.json`): 80 SDK, 61 handwritten
   assembly, 8 renamed host-colliding names (file I/O, `exit`, `ccos`/`csin`).
@@ -235,8 +265,10 @@ connected: two-player trades and duels),
 `MEMORIES_DEBUG_DECK="723-762"` (the deck, as ids and ranges repeated to
 forty), both once a save is live ([More cards](more-cards.md)),
 `MEMORIES_NO_AUDIO=1`, `MEMORIES_DUMP_AUDIO=path` (raw s16le stereo 44.1 kHz
-instead of a device), and
-`MEMORIES_STUB_TRACE=1`. Traces on stderr: `MEMORIES_TRACE_SPU=1` (every
+instead of a device),
+`MEMORIES_TEST_EXEC_GUEST=1` (guest RAM mapped executable, as without DEP,
+to check that the branch thunks carry every guest call; see "How it works"),
+and `MEMORIES_STUB_TRACE=1`. Traces on stderr: `MEMORIES_TRACE_SPU=1` (every
 `SpuSetKeyOnWithAttr`), `MEMORIES_TRACE_INPUT=1` (scripted pad changes with
 frame and VBlank numbers; script frames are presented frames, which run
 behind VBlanks during loads and the movie), `MEMORIES_TRACE_FRAMES=1`
@@ -285,9 +317,10 @@ resident C never references (`GetTPage`, `SetPolyFT4`, `RotMatrixX`,
 `gteMIMefunc`, `catan`, `GsGetLs`, ...); those are ported in
 `src/pc/sdk/libgte_extra.c` from the resident assembly so they enter the
 function map. Calls the other way (a native routine reaching a callback an
-effect installed) go through the guest-call fault handler into the
-interpreter. Interpreted code runs on its own stack mapped at `0x9FF00000`,
-negative like every console address, and nests through native calls.
+effect installed) go through the branch thunks (or, as the second net, the
+guest-call fault handler) into the interpreter. Interpreted code runs on its
+own stack mapped at `0x9FF00000`, negative like every console address, and
+nests through native calls.
 
 Checked from `slot1.state`: the AI's attack (card clash, damage lettering,
 burn destruction: ids 2 and 3), the player's attack committed with Square
@@ -2102,7 +2135,7 @@ Native pieces (all under `src/pc/`):
 | LIBGS units | `sdk/libgs_unit.c` | The HMD path the town map uses: `GsMapUnit`, `GsMapCoordUnit`, `GsScanUnit`, `GsSortUnit` (primitive drivers are function pointers the game installs), the library's null and image-upload drivers, `GsGetLwUnit`/`GsGetLsUnit`/`GsGetLwsUnit` with their per-frame coordinate cache, `GsMulCoord2/3`, `GsSetRefView2`, `GsSetLightMatrix`, `GsSetFlatLight`, `GsLinkAnim`, `GsScanAnim`; `GsSortLine`/`GsSortGLine` are in `libgs.c`. `tests`: a scratch harness checked that the reference point lands on the view axis at the right distance and `ApplyMatrixLV` against 64-bit math; not yet a CTest |
 | Model drivers | `overrides/model_polygon_drivers.c` | The 61 hand-written GTE routines at `0x800612C0`-`0x8006ADE8` are HMD primitive drivers, and one algorithm under switches: triangle/quad x flat/Gouraud, back-face culled (`0x0020xxxx`) or both-sided (`0x0030xxxx`), plain or tiled (`0x02xx`: each polygon wrapped in its texture-window word and a reset), a second bank that forces semi-transparency, a shared-vertex bank (`0x012x/0x013x`) fed by a pre-calculation pass at `0x80067220`, and twelve outline drivers. Record layouts, the lighting modes of `D_8009AFE4`, the colour cache and the translucent second pass are described at the top of the file. Read in full for each shape and by diff for each variant; the outline drivers and most variants have not been seen running yet |
 | Null page | `guest/image.c` | Retail code dereferences null pointers that land in kernel RAM on the console (`CardList_CreateSlotTextBox` clears a flag through `box->field_28` one call before that object is created; it made BUILD DECK fault). A faulting access below 64 KiB is redirected: the handler decodes the instruction's base register, points it at a mapping of guest RAM's first 64 KiB, single-steps (trap flag) and restores the register. Each site is reported once on stderr, which makes these bugs visible instead of fatal |
-| Guest calls | `guest/image.c` | Guest RAM is non-executable. A call through a MIPS address stored in the data image faults; the handler redirects to the native function via the generated `Memories_FunctionMap` |
+| Guest calls | `guest/branch_thunks.c`, `guest/image.c` | Every unit's indirect calls and jumps go through `__x86_indirect_thunk_<reg>`; a MIPS address stored in the data image resolves to the native function via the generated `Memories_FunctionMap` (or to the MIPS interpreter). Guest RAM is also non-executable, so a call that escaped the thunks faults and the handler redirects it the same way where DEP is on |
 | Overrides | `overlays/boot_check.c`, `sdk/deferred.c` | The boot package's console-modification check has no source and is passed. `GsSetFlatLight` and the debug font log once and do nothing |
 
 A native definition with a game function's name replaces it (the driver
@@ -2304,7 +2337,10 @@ What differs from Linux, and why:
   `Win32_ServiceInterrupt` from `Platform_WaitVBlank`. `pc/compat/signal.h`
   maps `sigprocmask`/`pthread_sigmask` on SIGALRM to that hold flag.
 - **Faults.** A vectored exception handler in `image.c` does what the
-  SIGSEGV/SIGTRAP handlers do (guest-call redirect, low-address fixup);
+  SIGSEGV/SIGTRAP handlers do (guest-call redirect, low-address fixup); the
+  guest-call redirect is the second net behind the branch thunks, since it
+  needs DEP: `image.c` turns DEP on for the process where Windows allows
+  (`SetProcessDEPPolicy`, which fails silently under `AlwaysOff`);
   32-bit processes on 64-bit Windows can report the single step as
   `STATUS_WX86_SINGLE_STEP`. Fatal exceptions raised in the executable are
   reported by `crash.c` through `Win32_SetCrashReporter`.

@@ -743,6 +743,7 @@ covered by a test (`tools/pc/test_object_loader.py`):
 | `-mstackrealign` | Windows only promises a 4-byte-aligned stack on the way in, and the Linux game (SSE2) needs 16 on the way out |
 | `-fstack-clash-protection` | a frame over 4 KiB touches each page, as Windows' stack guard page requires |
 | `-ffreestanding -nostdinc` | no system C library, as above |
+| `-mretpoline-external-thunk` (clang), `-mindirect-branch=thunk-extern -mindirect-branch-register` (GCC) | every indirect call goes through the game's `__x86_indirect_thunk_*`, which the C library list lends, so a call through a function pointer read from a game table (a MIPS address) reaches the native function without DEP, as in the game's own code. A mod built this way needs a game that lends the thunks (the release its SDK came with, or a later one) |
 
 The loader refuses anything it does not handle, with the reason in the Mods
 window: position-independent code, relocations other than plain absolute

@@ -17,7 +17,8 @@ import build_mod
 
 OUT = os.path.join(ROOT, "tmp/pc/object-loader-test")
 FIXTURES = os.path.join(ROOT, "tests/pc/mod_fixtures")
-SOURCES = ["src/pc/compat/fs.c", "tests/pc/object_loader_test.c", "src/pc/mods/object_loader.c", "src/pc/mods/mod_libc.c"]
+SOURCES = ["src/pc/compat/fs.c", "tests/pc/object_loader_test.c", "src/pc/mods/object_loader.c", "src/pc/mods/mod_libc.c",
+           "src/pc/guest/branch_thunks.c"]
 
 
 def fixtures():

@@ -255,8 +255,23 @@ if(BUILD_TESTING)
         target_compile_options(memories_deck_slots_test PRIVATE -Wall -Wextra -Wpedantic -Werror)
     endif()
     add_test(NAME pc_deck_slots COMMAND memories_deck_slots_test)
+    # The indirect-branch thunks every game unit calls through, which send a
+    # call to a guest address to its native function without DEP: 32-bit x86.
+    if(CMAKE_SIZEOF_VOID_P EQUAL 4 AND CMAKE_C_COMPILER_ID MATCHES "Clang|GNU")
+        add_executable(memories_branch_thunks_test tests/pc/branch_thunks_test.c src/pc/guest/branch_thunks.c)
+        target_include_directories(memories_branch_thunks_test PRIVATE src)
+        if(CMAKE_C_COMPILER_ID MATCHES "Clang")
+            target_compile_options(memories_branch_thunks_test PRIVATE -mretpoline-external-thunk)
+        else()
+            target_compile_options(memories_branch_thunks_test PRIVATE -mindirect-branch=thunk-extern
+                -mindirect-branch-register)
+        endif()
+        target_compile_options(memories_branch_thunks_test PRIVATE -Wall -Wextra -Werror)
+        add_test(NAME pc_branch_thunks COMMAND memories_branch_thunks_test)
+    endif()
+    # mod_libc.c lends mods the indirect-branch thunks (src/pc/guest/branch_thunks.c).
     add_executable(memories_mods_test tests/pc/mods_test.c src/pc/mods/mods.c src/pc/mods/events.c src/pc/mods/hooks.c src/pc/mods/manager.c src/pc/mods/mod_libc.c
-        src/pc/mods/object_loader.c src/pc/mods/json.c
+        src/pc/mods/object_loader.c src/pc/mods/json.c src/pc/guest/branch_thunks.c
         src/pc/platform/paths.c src/pc/platform/settings.c)
     target_include_directories(memories_mods_test PRIVATE src)
     # The mod C library hands mods the maths functions and reads the monotonic
@@ -268,7 +283,7 @@ if(BUILD_TESTING)
     endif()
     add_test(NAME pc_mods COMMAND memories_mods_test)
     set(MOD_TEST_SOURCES src/pc/mods/mods.c src/pc/mods/manager.c src/pc/mods/events.c src/pc/mods/hooks.c
-        src/pc/mods/mod_libc.c src/pc/mods/object_loader.c src/pc/mods/json.c
+        src/pc/mods/mod_libc.c src/pc/mods/object_loader.c src/pc/mods/json.c src/pc/guest/branch_thunks.c
         src/pc/platform/paths.c src/pc/platform/settings.c)
     add_executable(memories_mods_manager_test tests/pc/mods_manager_test.c ${MOD_TEST_SOURCES})
     target_include_directories(memories_mods_manager_test PRIVATE src)

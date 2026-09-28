@@ -90,12 +90,15 @@ static int low_access_register(const unsigned char *code, uint32_t esi)
     return (int)base;
 }
 
-/* Guest RAM is mapped without execute permission, so a call through a MIPS
- * address faults with EIP equal to that address. Tables in the retail data
- * image hold such addresses; the build generates Memories_FunctionMap (guest
- * address -> native function, sorted) and the handler resumes in the native
- * function. The caller's return address and cdecl arguments are already on
- * the stack, so the redirect is transparent. Anything else is fatal.
+/* Tables in the retail data image hold MIPS function addresses, and native
+ * code calls through them. The build generates Memories_FunctionMap (guest
+ * address -> native function, sorted); a call to such an address resumes in
+ * the native function. The caller's return address and cdecl arguments are
+ * already on the stack, so the redirect is transparent. Two ways lead here:
+ * the indirect-branch thunks every unit is compiled to use (branch_thunks.c,
+ * through guest_branch_target below), and, as the second net, the fault of
+ * executing guest RAM, which is mapped without execute permission
+ * (on_guest_exception, on_fault). Anything else is fatal.
  * Returns where to resume, or NULL. */
 static void *guest_call_target(uint32_t address)
 {
@@ -134,6 +137,40 @@ static void report_guest_fault(uint32_t address, uint32_t eip)
                           (unsigned)address, (unsigned)eip);
     }
     (void)!write(2, text, (size_t)length);
+}
+
+/* Memories_GuestBranchResolver: where an indirect call or jump the thunks
+ * caught goes. Outside the guest ranges (and below 0x10000, so that a call
+ * through a null pointer still faults as one), the address itself. A guest
+ * address with no native function is never jumped to: with DEP off its MIPS
+ * bytes would run as x86 code. */
+static void *guest_branch_target(unsigned address)
+{
+    char text[64];
+    void *target;
+    if (!(address >= 0x10000u && address < MEMORIES_GUEST_RAM_SIZE) &&
+        address - MEMORIES_GUEST_RAM >= MEMORIES_GUEST_RAM_SIZE && address - 0xa0000000u >= MEMORIES_GUEST_RAM_SIZE) {
+        return (void *)(uintptr_t)address;
+    }
+    if ((target = guest_call_target(address)) != NULL) {
+        return target;
+    }
+    report_guest_fault(address, address);
+    snprintf(text, sizeof(text), "0x%08x has no native function", address);
+    Crash_ReportFatal("call into guest code", text);
+    Profile_Flush();
+    _exit(70);
+}
+
+/* Guest RAM mapped executable (MEMORIES_TEST_EXEC_GUEST=1), as it is where
+ * DEP is off: then only the thunks keep a guest call from running MIPS bytes,
+ * which makes "the game works without DEP" testable on any machine. */
+static int guest_ram_executable(void)
+{
+    const char *value = getenv("MEMORIES_TEST_EXEC_GUEST");
+    if (!value || !*value || !strcmp(value, "0")) return 0;
+    fprintf(stderr, "memories-pc: guest RAM is mapped executable (MEMORIES_TEST_EXEC_GUEST)\n");
+    return 1;
 }
 
 #ifdef _WIN32
@@ -247,10 +284,12 @@ static LONG CALLBACK on_guest_exception(EXCEPTION_POINTERS *pointers)
  * access to a piece Windows holds faults and goes through guest RAM
  * instead (on_guest_exception). Such accesses into pages Windows has
  * mapped readable would not fault; the sites that fault are reported. */
+static DWORD view_access = FILE_MAP_ALL_ACCESS;
+
 static int view_at(HANDLE section, uint32_t address, size_t length, DWORD offset)
 {
     void *wanted = (void *)(uintptr_t)address;
-    if (MapViewOfFileEx(section, FILE_MAP_ALL_ACCESS, 0, offset, length, wanted) != wanted) {
+    if (MapViewOfFileEx(section, view_access, 0, offset, length, wanted) != wanted) {
         fprintf(stderr, "cannot map guest memory at 0x%08x (error %lu)\n", (unsigned)address,
                 GetLastError());
         return -1;
@@ -258,43 +297,30 @@ static int view_at(HANDLE section, uint32_t address, size_t length, DWORD offset
     return 0;
 }
 
-/* A call into guest code is caught as the fault of executing guest RAM
- * (guest_call_target), which needs DEP for this process. The executable asks
- * for it (--nxcompat), which is enough where Windows applies DEP to programs
- * that do (OptIn, the default). Where it is off for this program (AlwaysOff,
- * or OptOut with the program excepted), guest RAM runs: the MIPS bytes of a
- * handler the game calls are taken as x86 code, which jumps somewhere
- * unrelated and crashes (a player's, on the title's Options: 0x902b4950 from
- * the text handler at 0x80038b4c). Turned on here if Windows lets a program
- * do so; if not, the player is told how instead of the game crashing. */
-static int require_dep(void)
+/* Calls into guest code go through the branch thunks, which need nothing
+ * from Windows. DEP is only the second net: with it, a call that escaped
+ * them faults into on_guest_exception instead of running MIPS bytes. The
+ * executable asks for it (--nxcompat), enough where Windows applies DEP to
+ * programs that do (OptIn, the default); under OptOut with the program
+ * excepted it is turned on here if Windows allows. Under AlwaysOff it
+ * cannot be, and the thunks carry every guest call on their own. */
+static void ask_for_dep(void)
 {
     DWORD flags = 0;
     BOOL permanent = FALSE;
-    char text[640];
-    if (GetProcessDEPPolicy(GetCurrentProcess(), &flags, &permanent) && (flags & PROCESS_DEP_ENABLE)) return 0;
-    if (SetProcessDEPPolicy(PROCESS_DEP_ENABLE) && GetProcessDEPPolicy(GetCurrentProcess(), &flags, &permanent) &&
-        (flags & PROCESS_DEP_ENABLE)) {
-        return 0;
-    }
-    snprintf(text, sizeof(text),
-             "Windows' Data Execution Prevention (DEP) is off for this program, and the game needs it.\n\n%s",
-             GetSystemDEPPolicy() == 3
-                 ? "Remove memories-pc.exe from the exceptions in System Properties > Advanced > Performance "
-                   "Settings > Data Execution Prevention, then start the game again."
-                 : "To turn it back on, run this in a Command Prompt opened as administrator, then restart "
-                   "Windows:\n\n    bcdedit /set nx OptIn");
-    fprintf(stderr, "memories-pc: %s\n", text);
-    if (!getenv("MEMORIES_HEADLESS")) MessageBoxA(NULL, text, "YFM Re-Decomp", MB_OK | MB_ICONERROR);
-    return -1;
+    if (GetProcessDEPPolicy(GetCurrentProcess(), &flags, &permanent) && (flags & PROCESS_DEP_ENABLE)) return;
+    SetProcessDEPPolicy(PROCESS_DEP_ENABLE);
 }
 
 int Memories_GuestMap(void)
 {
     HANDLE section;
-    int result;
-    if (require_dep()) return -1;
-    section = CreateFileMappingA(INVALID_HANDLE_VALUE, NULL, PAGE_READWRITE, 0, MEMORIES_GUEST_RAM_SIZE, NULL);
+    int result, executable = guest_ram_executable();
+    ask_for_dep();
+    Memories_GuestBranchResolver = guest_branch_target;
+    if (executable) view_access = FILE_MAP_ALL_ACCESS | FILE_MAP_EXECUTE;
+    section = CreateFileMappingA(INVALID_HANDLE_VALUE, NULL, executable ? PAGE_EXECUTE_READWRITE : PAGE_READWRITE, 0,
+                                 MEMORIES_GUEST_RAM_SIZE, NULL);
     AddVectoredExceptionHandler(1, on_guest_exception);
     if (section == NULL) {
         fprintf(stderr, "guest RAM: CreateFileMapping failed (error %lu)\n", GetLastError());
@@ -305,7 +331,7 @@ int Memories_GuestMap(void)
     {
         uint32_t piece, held = 0;
         for (piece = 0x10000u; piece < MEMORIES_GUEST_RAM_SIZE; piece += 0x10000u) {
-            if (MapViewOfFileEx(section, FILE_MAP_ALL_ACCESS, 0, piece, 0x10000u, (void *)(uintptr_t)piece) == NULL) {
+            if (MapViewOfFileEx(section, view_access, 0, piece, 0x10000u, (void *)(uintptr_t)piece) == NULL) {
                 held += 0x10000u;
             }
         }
@@ -326,11 +352,13 @@ int Memories_GuestMap(void)
     return result ? -1 : 0;
 }
 #else
+static int view_protection = PROT_READ | PROT_WRITE;
+
 static int map_at(uint32_t address, size_t length, int fd, off_t offset)
 {
     void *wanted = (void *)(uintptr_t)address;
     int flags = MAP_FIXED_NOREPLACE | (fd < 0 ? MAP_PRIVATE | MAP_ANONYMOUS : MAP_SHARED);
-    if (mmap(wanted, length, PROT_READ | PROT_WRITE, flags, fd, offset) != wanted) {
+    if (mmap(wanted, length, fd < 0 ? PROT_READ | PROT_WRITE : view_protection, flags, fd, offset) != wanted) {
         fprintf(stderr, "cannot map guest memory at 0x%08x\n", (unsigned)address);
         return -1;
     }
@@ -393,6 +421,8 @@ int Memories_GuestMap(void)
 {
     struct sigaction action;
     int fd, result;
+    if (guest_ram_executable()) view_protection |= PROT_EXEC;
+    Memories_GuestBranchResolver = guest_branch_target;
     memset(&action, 0, sizeof(action));
     action.sa_sigaction = on_fault;
     action.sa_flags = SA_SIGINFO | SA_ONSTACK;

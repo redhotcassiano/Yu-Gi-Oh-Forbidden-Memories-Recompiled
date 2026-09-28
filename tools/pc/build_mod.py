@@ -17,6 +17,11 @@ close every gap between the two 32-bit ABIs (notes/portable-mods-plan.md):
                                   as Windows' guard page requires
   -ffreestanding -nostdinc        no system C library: the SDK's headers
                                   (src/pc/mods/sdk) declare what the game lends
+  -mretpoline-external-thunk      (clang; GCC: -mindirect-branch=thunk-extern
+                                  -mindirect-branch-register) indirect calls go
+                                  through the game's __x86_indirect_thunk_*,
+                                  so a call through a guest function pointer
+                                  works without DEP, as in the game's own code
 
 The compiler is clang (on Windows, llvm-mingw's, targeting i386 Linux ELF),
 else gcc -m32. MEMORIES_MOD_CC names another. The game's headers come from
@@ -42,8 +47,9 @@ FLAGS = ["-std=gnu11", "-O2", "-g", "-fno-pic", "-fno-pie", "-fno-common", "-fno
          "-march=i686", "-mno-sse", "-mno-mmx", "-ffreestanding", "-nostdinc",
          "-DMEMORIES_PC", "-DMEMORIES_MOD", "-D_LANGUAGE_C", "-DLANGUAGE_C", "-Wall",
          "-Wno-unused-function", "-Wno-missing-braces"]
-CLANG_FLAGS = ["--target=i386-pc-linux-gnu", "-mstackrealign"]
-GCC_FLAGS = ["-m32", "-mstackrealign", "-mincoming-stack-boundary=2"]
+CLANG_FLAGS = ["--target=i386-pc-linux-gnu", "-mstackrealign", "-mretpoline-external-thunk"]
+GCC_FLAGS = ["-m32", "-mstackrealign", "-mincoming-stack-boundary=2", "-mindirect-branch=thunk-extern",
+             "-mindirect-branch-register"]
 
 
 def tool(name):

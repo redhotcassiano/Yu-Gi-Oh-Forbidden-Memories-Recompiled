@@ -17,7 +17,9 @@ int deep(int n);
 static const char greeting[] = "hello";
 static int counter = 5;
 static int zeroes[64];
-static int (*callback)(int, int) = host_add;
+/* volatile: called through rather than folded into a direct call, so the call
+ * goes through the game's indirect-branch thunk (build_mod.py). */
+static int (*volatile callback)(int, int) = host_add;
 
 static int twice(int x)
 {

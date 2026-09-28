@@ -8,7 +8,9 @@
  *
  * The compiler's own helpers are here too: 32-bit x86 code does 64-bit
  * division and some conversions by calling them, and both toolchains
- * (libgcc, compiler-rt) have the same ones under the same names.
+ * (libgcc, compiler-rt) have the same ones under the same names. So are the
+ * game's indirect-branch thunks, which build_mod.py has every indirect call
+ * of a mod go through (src/pc/guest/branch_thunks.c).
  *
  * Adding a name here is a promise to every mod built afterwards; removing one
  * breaks the mods that use it. The SDK's headers (sdk/include) declare
@@ -37,6 +39,13 @@ extern double __floatdidf(long long);
 extern float __floatdisf(long long);
 extern double __floatundidf(unsigned long long);
 extern float __floatundisf(unsigned long long);
+extern void __x86_indirect_thunk_eax(void);
+extern void __x86_indirect_thunk_ebp(void);
+extern void __x86_indirect_thunk_ebx(void);
+extern void __x86_indirect_thunk_ecx(void);
+extern void __x86_indirect_thunk_edi(void);
+extern void __x86_indirect_thunk_edx(void);
+extern void __x86_indirect_thunk_esi(void);
 #endif
 
 /* rand as the C standard's own example has it, so a mod draws the same
@@ -58,7 +67,9 @@ static const struct { const char *name; Function function; } functions[] = {
 #if defined(__i386__)
     F(__divdi3), F(__divmoddi4), F(__fixdfdi), F(__fixsfdi), F(__fixunsdfdi), F(__fixunssfdi),
     F(__floatdidf), F(__floatdisf), F(__floatundidf), F(__floatundisf), F(__moddi3), F(__udivdi3),
-    F(__udivmoddi4), F(__umoddi3),
+    F(__udivmoddi4), F(__umoddi3), F(__x86_indirect_thunk_eax), F(__x86_indirect_thunk_ebp),
+    F(__x86_indirect_thunk_ebx), F(__x86_indirect_thunk_ecx), F(__x86_indirect_thunk_edi),
+    F(__x86_indirect_thunk_edx), F(__x86_indirect_thunk_esi),
 #endif
     F(abs), F(acos), F(asin), F(atan), F(atan2), F(atan2f), F(atoi), F(bsearch), F(calloc), F(ceil),
     F(ceilf), F(cos), F(cosf), F(exp), F(expf), F(fabs), F(fabsf), F(fclose), F(fgets), F(floor),

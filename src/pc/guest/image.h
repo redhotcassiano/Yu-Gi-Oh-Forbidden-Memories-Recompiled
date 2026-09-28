@@ -44,6 +44,12 @@ int Memories_ModuleIsResident(unsigned bank, unsigned identifier);
 /* Tell the registry that the loader stored into guest memory. */
 void Memories_GuestWritten(void *destination, size_t length);
 
+/* Where an indirect call or jump into guest memory goes (branch_thunks.c):
+ * the native function of that address, the MIPS interpreter's entry, or the
+ * address itself outside guest memory. Set by Memories_GuestMap; while it is
+ * NULL every target is taken as it is. */
+extern void *(*Memories_GuestBranchResolver)(unsigned address);
+
 /* Reached by a generated stub for a routine with no native implementation. */
 void Memories_Unimplemented(const char *name);
 #endif
