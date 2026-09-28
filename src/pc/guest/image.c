@@ -258,11 +258,43 @@ static int view_at(HANDLE section, uint32_t address, size_t length, DWORD offset
     return 0;
 }
 
+/* A call into guest code is caught as the fault of executing guest RAM
+ * (guest_call_target), which needs DEP for this process. The executable asks
+ * for it (--nxcompat), which is enough where Windows applies DEP to programs
+ * that do (OptIn, the default). Where it is off for this program (AlwaysOff,
+ * or OptOut with the program excepted), guest RAM runs: the MIPS bytes of a
+ * handler the game calls are taken as x86 code, which jumps somewhere
+ * unrelated and crashes (a player's, on the title's Options: 0x902b4950 from
+ * the text handler at 0x80038b4c). Turned on here if Windows lets a program
+ * do so; if not, the player is told how instead of the game crashing. */
+static int require_dep(void)
+{
+    DWORD flags = 0;
+    BOOL permanent = FALSE;
+    char text[640];
+    if (GetProcessDEPPolicy(GetCurrentProcess(), &flags, &permanent) && (flags & PROCESS_DEP_ENABLE)) return 0;
+    if (SetProcessDEPPolicy(PROCESS_DEP_ENABLE) && GetProcessDEPPolicy(GetCurrentProcess(), &flags, &permanent) &&
+        (flags & PROCESS_DEP_ENABLE)) {
+        return 0;
+    }
+    snprintf(text, sizeof(text),
+             "Windows' Data Execution Prevention (DEP) is off for this program, and the game needs it.\n\n%s",
+             GetSystemDEPPolicy() == 3
+                 ? "Remove memories-pc.exe from the exceptions in System Properties > Advanced > Performance "
+                   "Settings > Data Execution Prevention, then start the game again."
+                 : "To turn it back on, run this in a Command Prompt opened as administrator, then restart "
+                   "Windows:\n\n    bcdedit /set nx OptIn");
+    fprintf(stderr, "memories-pc: %s\n", text);
+    if (!getenv("MEMORIES_HEADLESS")) MessageBoxA(NULL, text, "YFM Re-Decomp", MB_OK | MB_ICONERROR);
+    return -1;
+}
+
 int Memories_GuestMap(void)
 {
-    HANDLE section = CreateFileMappingA(INVALID_HANDLE_VALUE, NULL, PAGE_READWRITE, 0,
-                                        MEMORIES_GUEST_RAM_SIZE, NULL);
+    HANDLE section;
     int result;
+    if (require_dep()) return -1;
+    section = CreateFileMappingA(INVALID_HANDLE_VALUE, NULL, PAGE_READWRITE, 0, MEMORIES_GUEST_RAM_SIZE, NULL);
     AddVectoredExceptionHandler(1, on_guest_exception);
     if (section == NULL) {
         fprintf(stderr, "guest RAM: CreateFileMapping failed (error %lu)\n", GetLastError());
